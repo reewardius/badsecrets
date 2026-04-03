@@ -84,12 +84,6 @@ Severity: HIGH
 Details: True
 ```
 
-File output (`-o results.txt`) is the same but with the badsecrets ASCII banner and version line removed. Each result is terminated with:
-
-```
-########## RESULT END ##########
-```
-
 ---
 
 ## How it works
