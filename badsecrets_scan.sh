@@ -209,7 +209,8 @@ process_target() {
         if [[ -n "$OUTPUT_FILE" ]]; then
           clean_output=$(echo "$output" \
             | sed 's/\x1B\[[0-9;]*[JKmsu]//g' \
-            | grep -vE '^\s*[_\\|/ )]+\s*$|^Version\s*-|^\s*$')
+            | sed -n '/Known Secret Found!/,$p' \
+            | grep -vE '^\s*$')
           {
             echo "[+] Target: $target | Cookie: $key=$value"
             echo "$clean_output"
