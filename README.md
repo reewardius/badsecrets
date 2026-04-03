@@ -88,6 +88,8 @@ https://target3.com
     ├─ Severity : HIGH
     └─ Value    : eyJ1c2VyIjoiYWRtaW4i...
 ```
+<img width="945" height="471" alt="image" src="https://github.com/user-attachments/assets/52669cfa-59ba-4b91-b028-cf3b14692b4c" />
+
 
 ### Debug mode (`-debug`)
 
