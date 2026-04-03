@@ -1,4 +1,6 @@
 #!/bin/bash
+# badsecrets_scan.sh — extract cookies via nuclei and crack weak secrets with badsecrets
+
 DEBUG=false
 OUTPUT_FILE=""
 INPUT_FILE=""
@@ -8,8 +10,8 @@ show_help() {
   echo "Usage: bash badsecrets_scan.sh [OPTIONS]"
   echo
   echo "Options:"
-  echo "  -debug              Enable debug mode"
-  echo "  -f, --file FILE     File with URLs (default: alive_http_services.txt)"
+  echo "  -debug              Enable debug mode (prints each cookie being tested)"
+  echo "  -f, --file FILE     File with target URLs (default: alive_http_services.txt)"
   echo "  -u, --url URL       Single target URL"
   echo "  -o, --output FILE   Write successful results to FILE"
   echo "  -help, -h           Show this help message"
@@ -21,7 +23,7 @@ show_help() {
   echo
 }
 
-# Проверка и установка badsecrets
+# Check if badsecrets is installed; install it if not
 if ! command -v badsecrets &>/dev/null; then
   echo "[*] badsecrets not found, installing..."
   if ! pip install badsecrets 2>&1; then
@@ -31,6 +33,7 @@ if ! command -v badsecrets &>/dev/null; then
   echo "[+] badsecrets installed successfully"
 fi
 
+# Parse arguments
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -debug) DEBUG=true; shift ;;
@@ -63,7 +66,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# Определяем источник целей
+# Resolve target source: single URL, file, or default file
 if [[ -n "$SINGLE_TARGET" && -n "$INPUT_FILE" ]]; then
   echo "Error: Use either -u or -f, not both"
   exit 1
@@ -84,18 +87,23 @@ else
   exit 1
 fi
 
+# Clear output file before scanning
 if [[ -n "$OUTPUT_FILE" ]]; then
   > "$OUTPUT_FILE"
 fi
 
+# Process a single target URL
 process_target() {
   local target="$1"
   echo "[*] Checking: $target"
 
   unset cookie_map
+
+  # Run nuclei to extract Set-Cookie values from the target
   findings=$(echo "$target" | nuclei -t cookie-extractor.yaml -silent)
 
   if [ -n "$findings" ]; then
+    # Parse key=value pairs, filter out cookie attribute directives
     mapfile -t pairs < <(echo "$findings" | grep -oP '[a-zA-Z0-9._-]+=[^;]+' | grep -viE '^(Path|Domain|Expires|HttpOnly|Secure|SameSite|Max-Age)=')
 
     declare -A cookie_map
@@ -113,13 +121,16 @@ process_target() {
           echo "[DEBUG] Testing cookie: $key=$value"
         fi
 
+        # Run badsecrets against the raw cookie value
         output=$(badsecrets "$value" 2>&1)
 
+        # Check for a successful crack
         if echo "$output" | grep -q "Known Secret Found!"; then
           result="[+] Target: $target | Cookie: $key=$value"
           echo "$result"
           echo "$output"
 
+          # Write to output file (strip ANSI codes and badsecrets banner/version line)
           if [[ -n "$OUTPUT_FILE" ]]; then
             clean_output=$(echo "$output" \
               | sed 's/\x1B\[[0-9;]*[JKmsu]//g' \
@@ -139,11 +150,12 @@ process_target() {
   fi
 }
 
-# Запуск по одному URL или по файлу
+# Run against single URL or iterate over file
 if [[ -n "$SINGLE_TARGET" ]]; then
   process_target "$SINGLE_TARGET"
 else
   while IFS= read -r target; do
+    # Skip empty lines and comments
     [[ -z "$target" || "$target" == "#"* ]] && continue
     process_target "$target"
   done < "$TARGETS"
