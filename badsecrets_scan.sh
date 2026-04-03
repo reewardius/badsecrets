@@ -2,15 +2,26 @@
 # badsecrets_scan.sh — extract cookies via nuclei and crack weak secrets with badsecrets
 
 DEBUG=false
+HEADLESS=false
 OUTPUT_FILE=""
 INPUT_FILE=""
 SINGLE_TARGET=""
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+GRAY='\033[0;90m'
+BOLD='\033[1m'
+NC='\033[0m'
 
 show_help() {
   echo "Usage: bash badsecrets_scan.sh [OPTIONS]"
   echo
   echo "Options:"
-  echo "  -debug              Enable debug mode (prints each cookie being tested)"
+  echo "  -debug              Enable debug mode (prints cookies found and tested)"
+  echo "  -headless           Enable nuclei headless mode (Chromium, for JS-set cookies)"
   echo "  -f, --file FILE     File with target URLs (default: alive_http_services.txt)"
   echo "  -u, --url URL       Single target URL"
   echo "  -o, --output FILE   Write successful results to FILE"
@@ -37,6 +48,7 @@ fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -debug) DEBUG=true; shift ;;
+    -headless) HEADLESS=true; shift ;;
     -f|--file)
       INPUT_FILE="$2"
       if [[ -z "$INPUT_FILE" ]]; then
@@ -95,59 +107,134 @@ fi
 # Process a single target URL
 process_target() {
   local target="$1"
-  echo "[*] Checking: $target"
+
+  # Skip target if it does not respond within 5 seconds
+  if ! curl -sk --max-time 5 --output /dev/null "$target"; then
+    printf "${GRAY}[*] Checking: %-50s [TIMEOUT]${NC}\n" "$target"
+    return
+  fi
 
   unset cookie_map
 
+  # Build nuclei flags — append -headless if requested
+  NUCLEI_FLAGS="-t cookie-extractor.yaml -silent"
+  $HEADLESS && NUCLEI_FLAGS="$NUCLEI_FLAGS -headless"
+
   # Run nuclei to extract Set-Cookie values from the target
-  findings=$(echo "$target" | nuclei -t cookie-extractor.yaml -silent)
+  findings=$(echo "$target" | nuclei $NUCLEI_FLAGS)
 
-  if [ -n "$findings" ]; then
-    # Parse key=value pairs, filter out cookie attribute directives
-    mapfile -t pairs < <(echo "$findings" | grep -oP '[a-zA-Z0-9._-]+=[^;]+' | grep -viE '^(Path|Domain|Expires|HttpOnly|Secure|SameSite|Max-Age)=')
+  if [ -z "$findings" ]; then
+    printf "${GRAY}[*] Checking: %-50s [NO COOKIES]${NC}\n" "$target"
+    return
+  fi
 
-    declare -A cookie_map
-    for pair in "${pairs[@]}"; do
-      key=$(echo "$pair" | cut -d '=' -f1)
-      value=$(echo "$pair" | cut -d '=' -f2-)
-      cookie_map["$key"]="$value"
-    done
+  # Parse key=value pairs, filter out cookie attribute directives
+  mapfile -t pairs < <(echo "$findings" | grep -oP '[a-zA-Z0-9._-]+=[^;]+' | grep -viE '^(Path|Domain|Expires|HttpOnly|Secure|SameSite|Max-Age)=')
 
+  declare -A cookie_map
+  for pair in "${pairs[@]}"; do
+    key=$(echo "$pair" | cut -d '=' -f1)
+    value=$(echo "$pair" | cut -d '=' -f2-)
+    cookie_map["$key"]="$value"
+  done
+
+  local cookie_count=${#cookie_map[@]}
+
+  # Print target line with cookie count
+  if $DEBUG; then
+    printf "${CYAN}[*] Checking: %-50s [COOKIES: %d]${NC}\n" "$target" "$cookie_count"
+    echo -e "${CYAN}    ┌─ Cookies extracted:${NC}"
     for key in "${!cookie_map[@]}"; do
-      value="${cookie_map[$key]}"
+      local display_val="${cookie_map[$key]}"
+      if [[ ${#display_val} -gt 70 ]]; then
+        display_val="${display_val:0:67}..."
+      fi
+      echo -e "${CYAN}    │  ${BOLD}${key}${NC}${CYAN} = ${display_val}${NC}"
+    done
+    echo -e "${CYAN}    └─ Running badsecrets...${NC}"
+  else
+    printf "[*] Checking: %-50s [COOKIES: %d]\n" "$target" "$cookie_count"
+  fi
 
-      if [ -n "$value" ]; then
+  local found_secret=false
+
+  for key in "${!cookie_map[@]}"; do
+    value="${cookie_map[$key]}"
+
+    if [ -n "$value" ]; then
+      if $DEBUG; then
+        echo -e "${GRAY}    [~] Testing: ${BOLD}${key}${NC}"
+      fi
+
+      # Run badsecrets against the raw cookie value
+      output=$(badsecrets "$value" 2>&1)
+
+      # Check for a successful crack
+      if echo "$output" | grep -q "Known Secret Found!"; then
+        found_secret=true
+
+        # Extract key fields from badsecrets output
+        local secret_val module severity
+        secret_val=$(echo "$output" | grep "^Secret:"           | cut -d':' -f2- | xargs)
+        module=$(echo "$output"     | grep "^Detecting Module:" | cut -d':' -f2- | xargs)
+        severity=$(echo "$output"   | grep "^Severity:"         | cut -d':' -f2- | xargs)
+
+        echo -e "${GREEN}${BOLD}[+] Checking: %-50s [YES — SECRET FOUND]${NC}" "$target"
+        echo -e "${GREEN}    ┌─ Cookie   : ${BOLD}${key}${NC}"
+        echo -e "${GREEN}    ├─ Module   : ${module}${NC}"
+        echo -e "${GREEN}    ├─ Secret   : ${BOLD}${secret_val}${NC}"
+        echo -e "${GREEN}    ├─ Severity : ${severity}${NC}"
+
         if $DEBUG; then
-          echo "[DEBUG] Testing cookie: $key=$value"
+          local display_val="$value"
+          if [[ ${#display_val} -gt 70 ]]; then
+            display_val="${display_val:0:67}..."
+          fi
+          echo -e "${GREEN}    ├─ Value    : ${display_val}${NC}"
+          echo -e "${GREEN}    └─ Full badsecrets output:${NC}"
+          echo "$output" \
+            | grep -vE '^\s*[_\\|/ )]+\s*$|^Version\s*-|^\s*$' \
+            | while IFS= read -r line; do
+                echo -e "${GREEN}       ${line}${NC}"
+              done
+        else
+          local short_val="$value"
+          if [[ ${#short_val} -gt 60 ]]; then
+            short_val="${short_val:0:57}..."
+          fi
+          echo -e "${GREEN}    └─ Value    : ${short_val}${NC}"
         fi
 
-        # Run badsecrets against the raw cookie value
-        output=$(badsecrets "$value" 2>&1)
+        # Write to output file (strip ANSI codes and badsecrets banner/version line)
+        if [[ -n "$OUTPUT_FILE" ]]; then
+          clean_output=$(echo "$output" \
+            | sed 's/\x1B\[[0-9;]*[JKmsu]//g' \
+            | grep -vE '^\s*[_\\|/ )]+\s*$|^Version\s*-|^\s*$')
+          {
+            echo "[+] Target: $target | Cookie: $key=$value"
+            echo "$clean_output"
+            echo "########## RESULT END ##########"
+            echo
+          } >> "$OUTPUT_FILE"
+        fi
 
-        # Check for a successful crack
-        if echo "$output" | grep -q "Known Secret Found!"; then
-          result="[+] Target: $target | Cookie: $key=$value"
-          echo "$result"
-          echo "$output"
-
-          # Write to output file (strip ANSI codes and badsecrets banner/version line)
-          if [[ -n "$OUTPUT_FILE" ]]; then
-            clean_output=$(echo "$output" \
-              | sed 's/\x1B\[[0-9;]*[JKmsu]//g' \
-              | grep -vE '^\s*[_\\|/ )]+\s*$|^Version\s*-|^\s*$')
-            {
-              echo "$result"
-              echo "$clean_output"
-              echo "########## RESULT END ##########"
-              echo
-            } >> "$OUTPUT_FILE"
-          fi
+      else
+        if $DEBUG; then
+          echo -e "${GRAY}    [~] No match for ${key}${NC}"
         fi
       fi
-    done
+    fi
+  done
 
-    unset cookie_map
+  if ! $found_secret; then
+    if $DEBUG; then
+      echo -e "${YELLOW}    └─ No weak secrets found for any cookie${NC}"
+    else
+      echo -e "${YELLOW}    └─ No weak secrets found${NC}"
+    fi
   fi
+
+  unset cookie_map
 }
 
 # Run against single URL or iterate over file
