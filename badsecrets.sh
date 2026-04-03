@@ -68,7 +68,7 @@ while IFS= read -r target; do
 
         output=$(badsecrets "$value" 2>&1)
 
-        if echo "$output" | grep -qiE "(Found|secret|match|cracked)"; then
+        if echo "$output" | grep -q "Known Secret Found!"; then
           result="[+] Target: $target | Cookie: $key=$value"
           echo "$result"
           echo "$output"
