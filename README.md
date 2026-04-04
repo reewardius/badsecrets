@@ -122,7 +122,7 @@ Shows all extracted cookie names/values before testing, and the result of each b
 
 ## File output (`-o`)
 
-Each result is written without the badsecrets ASCII banner or version line. Results are separated by a delimiter:
+Results are separated in file by a delimiter:
 
 ```
 [+] Target: http://vuln-target.com | Cookie: session=eyJ1c2VyIjoiYWRtaW4...
